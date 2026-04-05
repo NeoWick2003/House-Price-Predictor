@@ -1,0 +1,277 @@
+---
+title: "House Price Predictor"
+author: "Sajudra Gupta"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Calling of required libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(caret)
+library(rpart)
+library(base)
+library(corrplot)
+```
+
+## Loading of required data
+```{r}
+house_prices <- read.csv("C:/Users/gupta/OneDrive/Desktop/ML Projects/House Price Predictor/house_prices.csv")
+```
+
+## Data Preprocessing
+```{r}
+# Information in table
+head(house_prices)
+dim(house_prices)
+
+#Summary of table
+summary(house_prices)
+house_prices [house_prices == ""|house_prices == " "] <- NA #Converting empty cells into NAs
+colSums(is.na(house_prices))
+
+#Removal of variables having more than 50% NAs
+pricing <- house_prices[, colSums(is.na(house_prices))/nrow(house_prices) <0.5 ]
+pricing$Index<- NULL
+
+#head(pricing)
+head(pricing)
+summary(pricing)
+```
+
+## Feautre Engineering
+
+1. Converting numeric strings to numeric
+```{r}
+pricing$Balcony <-as.numeric(pricing$Balcony)
+pricing$Bathroom <-as.numeric(pricing$Bathroom)
+```
+
+2. Converting lakh and crores into numerics values
+```{r}
+pricing$Amount.in.rupees. <- as.numeric(gsub("Lac | Cr", " ", pricing$Amount.in.rupees.))* # Detecting Lac and Cr in Amount column
+  ifelse(grepl("Cr", pricing$Amount.in.rupees.), 100, 1)*100000 #Replacing the words with values with 100000 (100x for Cr, 1x for Lac)
+```
+
+
+3. Changing floor into fraction (calling it floor ratio)
+```{r}
+pricing$floor_ratio<- ifelse(grepl("Basement|upper|Lower", pricing$Floor, ignore.case=TRUE),-1, NA) #Assuming any level of basement: -1
+pricing$Floor <- sub(".*?(\\d+)\\s*out\\s*of\\s*(\\d+).*", "\\1/\\2",pricing$Floor) #Bringing the floors in a fraction format 
+split_floors <- strsplit(pricing$Floor, "/")
+pricing$floor_ratio <- as.numeric(sapply(split_floors, `[`, 1)) / as.numeric(sapply(split_floors, `[`, 2)) #Converting and evaluating the fractions from string to numerics
+pricing$floor_ratio[grepl("-1", pricing$Floor, ignore.case=TRUE)]<- -1 # Changing the data type from string to numeric
+pricing$floor_ratio[grepl("Ground", pricing$Floor, ignore.case=TRUE)] <- 0 #Changing ground floors to zero
+pricing$floor_ratio[pricing$floor_ratio > 1] <- 1 #Assigning roof tops and penthouses to 1
+```
+
+4. Extracting no. of BHKs
+```{r}
+pricing$bhk <- ifelse(grepl("Studio|Apartment", pricing$Title, ignore.case = TRUE),0.5,as.numeric(sub(".*?(\\d+)\\s*BHK.*", "\\1", pricing$Title))) #Setting studios for 0.5 BHK and others as per their given formula
+```
+
+5. Removing units from area
+```{r}
+pricing$Carpet.Area <- as.numeric(sub("(\\d+)\\s*sqft.*", "\\1", pricing$Carpet.Area)) #Removing the units and make the value numeric
+```
+
+
+##DATA CLEANING
+
+1. Removing NAs with median for numeric and mode for character
+```{r}
+pricing <- pricing %>%
+  mutate(across(where(is.numeric), #detects numeric variables
+                ~replace_na(., median(., na.rm = TRUE)))) %>% #replaces numeric NAs with median
+  mutate(across(where(is.character), ~{ #detects character variables
+    mode_val <- names(sort(table(.), decreasing = TRUE))[1] #sorting names in decreasing order wrt freqency, and extracting the first name
+    replace_na(., mode_val) #replaces NAs with mode
+  }))
+anyNA(pricing)
+head(pricing)
+```
+
+
+2. Detecting outliers
+```{r}
+summary(pricing$floor_ratio)
+summary(pricing$bhk)
+summary(pricing$Balcony)
+summary(pricing$Bathroom)
+```
+
+
+```{r}
+#Function for outlier detection
+oultier_detector <-function(data, column){
+  if(is.data.frame(data)) {
+    col_data <- data[[column]]
+  } else {
+    col_data <- data  
+  }
+  
+  q1 <- quantile(col_data,0.25,na.rm = TRUE)
+  q3 <- quantile(col_data,0.75,na.rm = TRUE)
+  iqr<- q3 - q1
+  upper <- q3+1.5*iqr
+  lower <- q1-1.5*iqr
+  
+  n_outliers <- sum(col_data < lower | col_data > upper)
+  return(n_outliers)
+}
+```
+
+```{r}
+#Function to cap outliers
+oultier_capper <- function(data, column){
+  if(is.data.frame(data)) {
+    col_data <- data[[column]]
+  } else {
+    col_data <- data  
+  }
+  q1 <- quantile(col_data,0.25,na.rm = TRUE)
+  q3 <- quantile(col_data,0.75,na.rm = TRUE)
+  iqr<- q3 - q1
+  upper <- q3+1.5*iqr
+  lower <- q1-1.5*iqr
+  
+  capped_data <- col_data
+  capped_data[col_data < lower] <- lower
+  capped_data[col_data > upper] <- upper
+  return(invisible(capped_data))
+}
+```
+
+
+```{r}
+oultier_detector(pricing$Price..in.rupees.)
+```
+
+```{r}
+pricing$Price..in.rupees.<- oultier_capper(pricing$Price..in.rupees.)
+summary(pricing$Price..in.rupees.)
+```
+
+3. Removing Title and Description
+```{r}
+pricing$Title <- NULL
+pricing$Description <- NULL #Since Bhk is extracted, they are of no use anymore
+pricing$Amount.in.rupees. <- NULL #Focusing on prices rather than indivdual amount 
+pricing$Status <- NULL #Since all are "ready to move"
+pricing$facing<- NULL
+```
+
+
+## EXPLORATORY DATA ANALYSIS
+```{r}
+hist(pricing$floor_ratio)
+hist(pricing$bhk)
+hist(pricing$Price..in.rupees.)
+```
+
+```{r}
+#Log transform of right skewed data
+pricing$log_bhk <- log(pricing$bhk)
+pricing$log_Price..in.rupees. <- log(pricing$Price..in.rupees. + 1)
+```
+
+```{r}
+hist(pricing$log_bhk )
+hist(pricing$log_Price..in.rupees. )
+```
+
+```{r}
+nums <- sapply(pricing, is.numeric)
+cor_price <- cor(pricing[, nums], use = "complete.obs")
+
+round(cor_price, 2)
+corrplot(cor_price)
+pricing$overlooking <- as.factor(pricing$overlooking)
+```
+
+We can observe that, the prices depend more on the no. of the available bathrooms and the balcony than the floor or the bhk of the house. 
+
+## REGRESSION MODEL
+
+1. Linear Regression
+```{r}
+model_lmb <- lm(log_Price..in.rupees. ~location + floor_ratio + Transaction + Furnishing + log_bhk + Bathroom + Balcony + Ownership+overlooking, data = pricing)
+summary(model_lmb)
+```
+
+```{r}
+AIC(model_lmb)
+```
+
+```{r}
+split_data <- function(pricing) # For data splitting
+{
+  train_split = createDataPartition(pricing$Price..in.rupees., p = 0.8, list = FALSE)
+  train_price = pricing[train_split,]
+  test_price = pricing[-train_split,]
+  return(list(train_price,test_price))
+}
+pricing_split <- split_data(pricing)
+train_pricing <- pricing_split[[1]]
+test_pricing <- pricing_split[[2]]
+pricing$overlooking<-as.factor(pricing$overlooking)
+pricing$Transaction <- as.factor(pricing$Transaction)
+```
+
+```{r}
+model_btr <- lm(Price..in.rupees.~location + floor_ratio + Transaction + Furnishing + bhk + Bathroom + Balcony + Ownership+overlooking+Carpet.Area, data = train_pricing)
+summary(model_btr)
+model_ltbr<-lm(log_Price..in.rupees.~location + floor_ratio + Transaction + Furnishing + log_bhk + Bathroom + Balcony + Ownership+overlooking+Carpet.Area, data = train_pricing)
+summary(model_ltbr)
+```
+
+```{r}
+#Calculating MAE
+pred_price_lr <- predict(model_btr, data = test_pricing)
+mae_lr <- mean(abs(test_pricing$Price..in.rupees. - pred_price_lr))
+mae_lr
+
+#Calculating RMSE
+rmse_lr<- RMSE(test_pricing$Price..in.rupees.,pred_price_lr)
+rmse_lr
+
+#Calculating AIC
+AIC(model_btr)
+```
+
+2. Random forest model
+
+```{r}
+library(randomForest)
+
+model_rf <- randomForest(Price..in.rupees.~location + floor_ratio + Transaction + Furnishing + bhk + Bathroom + Balcony + Ownership+overlooking+Carpet.Area, data = train_pricing,
+                        ntree = 500,      # Number of trees
+                        importance = TRUE, # Feature importance
+                        nodesize = 500,
+                        sampsize = 50000) # Min observations per leaf
+```
+
+```{r}
+print(model_rf)
+```
+
+
+```{r}
+# Predict & evaluate
+pred_rf <- predict(model_rf, test_pricing)
+rmse_rf <- sqrt(mean((test_pricing$Price..in.rupees. - pred_rf)^2))
+mae_rf <- mean(abs(test_pricing$Price..in.rupees. - pred_rf))
+mae_rf
+rmse_rf
+test_price <- test_pricing$Price..in.rupees.
+r2_rftest<- 1-sum((test_price - pred_rf)^2) / sum((test_price - mean(test_actual))^2)
+r2_rftest
+```
+
+```{r}
+price_model <- model_rf
+saveRDS(price_model, "House Price Predictior.rds")
+```
+
+

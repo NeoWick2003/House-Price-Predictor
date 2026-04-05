@@ -1,0 +1,186 @@
+---
+title: "House Price Predictor"
+author: "Sajudra Gupta"
+date: "`r Sys.Date()`"
+output: html_document
+runtime: shiny
+---
+```{r}
+# -----------------------------
+# Load required package
+# -----------------------------
+library(shiny)
+library(randomForest)
+```
+
+```{r}
+# -----------------------------
+# Load trained model
+# -----------------------------
+# Replace the file name below with your actual saved model file.
+price_model <- readRDS("C:/Users/gupta/OneDrive/Desktop/ML Projects/House Price Predictor/House Price Predictior.rds")
+```
+
+
+```{r}
+# -----------------------------
+# User Interface (UI)
+# -----------------------------
+ui <- fluidPage(
+  titlePanel("House Price Predictor"),
+  
+  tags$head(
+    tags$style(HTML("\n      body { background-color: #f7f7f7; }\n      .well { background-color: white; border-radius: 12px; }\n      .result-box {\n        background: #eef7ff;\n        padding: 16px;\n        border-radius: 10px;\n        border: 1px solid #cfe5ff;\n        margin-top: 15px;\n        font-size: 18px;\n        font-weight: bold;\n      }\n      .note-box {\n        background: #fff8e6;\n        padding: 12px;\n        border-radius: 8px;\n        border: 1px solid #f2d78a;\n        margin-top: 12px;\n      }\n    "))
+  ),
+  
+  sidebarLayout(
+    sidebarPanel(
+      
+      # Numeric input for size
+      numericInput("sqft", "Area in square feet", value = 1200, min = 100, step = 50),
+      
+      # Dropdowns for house details
+      selectInput("bhk", "BHK", choices = c("0.5 (for studio apartments)","1", "2", "3", "4", "5", "6", "7", "8", "9", "10"), selected = "2"),
+      selectInput("bath", "Bathrooms", choices = c("1", "2", "3", "4","5", "6", "7", "8", "9", "10"), selected = "2"),
+      selectInput("balcony", "Balconies", choices = c("1", "2", "3", "4","5", "6", "7", "8", "9", "10"), selected = "1"),
+      
+      # Furnishing dropdown
+      # IMPORTANT: these values must match your training data exactly.
+      selectInput("Furnishing", "Furnishing",
+        choices = c("Unfurnished", "Semi-Furnished", "Furnished"),
+        selected = "Semi-Furnished"
+      ),
+      
+      selectInput("Transaction", "Transaction",
+        choices = c("New Property", "Rent/Lease ", "Resale", "Other"),
+        selected = "Other"),
+      
+      selectInput("overlooking", "Overlooking",
+        choices = c("Garden/Park", "Garden/Park, Main Road, Pool ", "Garden/Park, Pool", "Garden/Park, Pool, Main Road, Not Available"," Main Road, Garden/Park","Main Road, Not Available","Main Road, Pool, Garden/Park","Pool, Garden/Park","Pool, Main Road","Pool, Main Road, Not Available","Garden/Park, Main Road"," Garden/Park, Not Available","Garden/Park, Pool, Main Road","Main Road","Main Road, Pool","Pool","Pool, Garden/Park, Main Road","Pool, Main Road, Garden/Park"),
+        selected = "Garden/Park"),
+      
+      selectInput("Ownership", "Ownership",
+        choices = c("Co-operative Society", "Freehold", "Leasehold", "Power Of Attorney"),
+        selected = "Power Of Attorney"),
+      
+      # Location dropdown
+      # Replace these with your actual location levels from the dataset.
+      selectInput(
+        "location","Location",
+        choices = c("agra","ahmadnagar","ahmedabad","allahabad","aurangabad","badlapur","bangalore"," belgaum","bhiwadi","bhopal","bhubaneswar","chandigarh","chennai","coimbatore","dehradun","durgapur","ernakulam","faridabad","ghaziabad","goa","greater-noida","guntur","gurgaon","guwahati","gwalior","haridwar","hyderabad","indore","jabalpur","jaipur","jamshedpur","jodhpur","kalyan","kanpur","kochi","kolkata","kozhikode","lucknow","ludhiana", "madurai","mangalore","mohali","mumbai","mysore","nagpur","nashik","navi-mumbai","navsari","nellore","new-delhi","noida", "palakkad","palghar","panchkula","patna","pondicherry","pune","raipur","rajahmundry","ranchi","satara","shimla","siliguri","solapur","sonipat","surat","thane","thrissur","tirupati","trichy","trivandrum","udaipur","udupi","vadodara","vapi", "varanasi","vijayawada","visakhapatnam","vrindavan","zirakpur"),
+        selected = "agra"
+      ),
+      
+      # Floor ratio calculator inputs
+      numericInput("floor_num", "Current floor number", value = 2, min = 0, step = 1),
+      numericInput("total_floors", "Total floors in building", value = 5, min = 1, step = 1),
+      
+      actionButton("predict_btn", "Predict House Price", class = "btn-primary"),
+      
+      div(
+        class = "note-box",
+        "Tip: The dropdown values must match the same categories used when training your model."
+      )
+    ),
+    
+    mainPanel(
+      h3("Prediction Output"),
+      p(strong("Calculated floor ratio:")),
+      verbatimTextOutput("floor_ratio_text"),
+      div(class = "result-box", textOutput("predicted_price")),
+      h4("Model Input Preview"),
+      tableOutput("input_preview")
+    )
+  )
+)
+```
+
+
+```{r}
+# -----------------------------
+# Server logic
+# -----------------------------
+server <- function(input, output, session) {
+  
+  # Reactive floor ratio calculator
+  # This recalculates automatically when floor values change.
+  floor_ratio_value <- reactive({
+    req(input$total_floors)
+    req(input$floor_num)
+    
+    validate(
+      need(input$total_floors > 0, "Total floors must be greater than 0."),
+      need(input$floor_num <= input$total_floors,
+           "Current floor cannot be greater than total floors."),
+      need(input$floor_num >= 0,
+           "Current floor cannot be negative.")
+    )
+    
+    input$floor_num / input$total_floors
+  })
+  
+  # Show floor ratio text to the user
+  output$floor_ratio_text <- renderText({
+    paste0(input$floor_num, " / ", input$total_floors,
+           " = ", round(floor_ratio_value(), 3))
+  })
+  
+  # Create the one-row input data frame sent to the model
+  prediction_data <- eventReactive(pricing$predict_btn, {
+    
+    # IMPORTANT:
+    # - Column names must match what the model was trained on.
+    # - Factor levels must match the training levels.
+    price_data <- data.frame(
+      sqft = as.numeric(pricing$Carpet.Area),
+      bhk = as.numeric(pricing$bhk),
+      bath = as.numeric(pricing$Bathroom),
+      balcony = as.numeric(pricing$Balcony),
+      furnishing = factor(
+        pricing$furnishing,
+        levels = c("Unfurnished", "Semi-Furnished", "Furnished")
+      ),
+      location = factor(
+        pricing$location,
+        levels = c("agra","ahmadnagar","ahmedabad","allahabad","aurangabad","badlapur","bangalore"," belgaum","bhiwadi","bhopal","bhubaneswar","chandigarh","chennai","coimbatore","dehradun","durgapur","ernakulam","faridabad","ghaziabad","goa","greater-noida","guntur","gurgaon","guwahati","gwalior","haridwar","hyderabad","indore","jabalpur","jaipur","jamshedpur","jodhpur","kalyan","kanpur","kochi","kolkata","kozhikode","lucknow","ludhiana", "madurai","mangalore","mohali","mumbai","mysore","nagpur","nashik","navi-mumbai","navsari","nellore","new-delhi","noida", "palakkad","palghar","panchkula","patna","pondicherry","pune","raipur","rajahmundry","ranchi","satara","shimla","siliguri","solapur","sonipat","surat","thane","thrissur","tirupati","trichy","trivandrum","udaipur","udupi","vadodara","vapi", "varanasi","vijayawada","visakhapatnam","vrindavan","zirakpur")
+      ),
+      floor_ratio = as.numeric(pricing$floor_ratio),
+      Transaction = factor(pricing$Transaction,
+                           levels =  c("New Property", "Rent/Lease ", "Resale", "Other")),
+      Overlooking = factor(pricing$overlooking,
+                           levels = c("Garden/Park", "Garden/Park, Main Road, Pool ", "Garden/Park, Pool", "Garden/Park, Pool, Main Road, Not Available"," Main Road, Garden/Park","Main Road, Not Available","Main Road, Pool, Garden/Park","Pool, Garden/Park","Pool, Main Road","Pool, Main Road, Not Available","Garden/Park, Main Road"," Garden/Park, Not Available","Garden/Park, Pool, Main Road","Main Road","Main Road, Pool","Pool","Pool, Garden/Park, Main Road","Pool, Main Road, Garden/Park")),
+      Ownership = factor(pricing$Ownership,
+                           levels =  c("Co-operative Society", "Freehold", "Leasehold", "Power Of Attorney"))
+    )
+    
+    price_data
+  })
+  
+  # Show the exact row going into the model
+  output$input_preview <- renderTable({
+    req(prediction_data())
+    prediction_data()
+  })
+  
+  # Predict only when button is clicked
+  predicted_value <- eventReactive(input$predict_btn, {
+    price_data <- prediction_data()
+    predict(price_model, newdata = price_data)
+  })
+  
+  # Display final predicted price
+  output$predicted_price <- renderText({
+    req(predicted_value())
+    paste0("Estimated Price: ₹ ", format(round(predicted_value(), 0), big.mark = ","))
+  })
+}
+
+```
+
+```{r}
+# -----------------------------
+# Run the app
+# -----------------------------
+shinyApp(ui = ui, server = server)
+```
+
